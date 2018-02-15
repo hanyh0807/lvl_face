@@ -9,6 +9,7 @@ import os
 
 import cv2
 import numpy as np
+from scipy import optimize
 from PIL import Image
 from shutil import copy2
 
@@ -21,6 +22,7 @@ from PyQt5.QtPrintSupport import QPrinter
 #import tensorflow as tf
 #from keras.backend.tensorflow_backend import set_session
 from keras.models import load_model
+import face_recognition
 
 #config = tf.ConfigProto(allow_soft_placement = True)
 #config.gpu_options.allow_growth = True
@@ -75,7 +77,6 @@ class ImageViewer(QMainWindow):
               
 #        with tf.device('/cpu:0'):
         self.model = load_model('model_facenet.h5')
-        self.faceCascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 
     def prewhiten(self, x):
         if x.ndim == 4:
@@ -134,11 +135,12 @@ class ImageViewer(QMainWindow):
         if bgrImage.shape[2] == 4:
             bgrImage = cv2.cvtColor(bgrImage, cv2.COLOR_BGRA2BGR)
             
-        if np.max(bgrImage.shape) > 1000:
+        maxpix = 1024
+        if np.max(bgrImage.shape) > maxpix:
             if bgrImage.shape[0] > bgrImage.shape[1]:
-                sc = 1000/bgrImage.shape[0]
+                sc = maxpix/bgrImage.shape[0]
             else:
-                sc = 1000/bgrImage.shape[1]
+                sc = maxpix/bgrImage.shape[1]
             bgrImage = cv2.resize(bgrImage, (int(bgrImage.shape[1]*sc), int(bgrImage.shape[0]*sc)))
         
         return bgrImage
@@ -146,26 +148,29 @@ class ImageViewer(QMainWindow):
     def findFaceAndClassify(self, fileName):
         bgrImage = self.readImage(fileName)        
         
-        faces = self.faceCascade.detectMultiScale(bgrImage, scaleFactor=1.2, minNeighbors=5, minSize=(48,48))
+        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB))
+#        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB),
+#                                                number_of_times_to_upsample=0, model="cnn")
+
         subjects = ["soul", "jiae", "jisoo", "mijoo", "jiyeon", "myungeun", "soojung", "yein"]
 
         outimg = bgrImage.copy()
-        for k,(x, y, w, h) in enumerate(faces):
+        for k,(top, right, bottom, left) in enumerate(faces):            
         	# extract the confidence (i.e., probability) associated with the
         	# prediction
-            im = cv2.resize(outimg[y:y+h, x:x+w],(160,160)).astype('float32')
+            im = cv2.resize(outimg[top:bottom, left:right],(160,160)).astype('float32')
             im = np.expand_dims(im, axis=0)
             testim = self.prewhiten(im)
             y_prod = self.model.predict(testim)
         #    y_prod = np.random.rand((8)).reshape((1,8))
          
         #    idx = np.argmax(y_prod)
-            pt1 = (x, y)
-            pt2 = (x+w, y+h)
+            pt1 = (left, top)
+            pt2 = (right, bottom)
             cv2.rectangle(outimg,pt1,pt2,(255,0,0),2) 
             
-            dx = x-156 if x+w+156 > outimg.shape[1] else x+w+3
-            y0, dy = y, 15
+            dx = left-156 if right+156 > outimg.shape[1] else right+3
+            y0, dy = top, 15
             for i, m in enumerate(subjects):
                 yo = y0 + (i+1)*dy
                 cv2.putText(outimg, m + ' : {:.4f}'.format(y_prod[0][i]), (dx, yo), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
@@ -175,13 +180,15 @@ class ImageViewer(QMainWindow):
     def findFaceAndClassifyForAuto(self, fileName):
         bgrImage = self.readImage(fileName)        
         
-        faces = self.faceCascade.detectMultiScale(bgrImage, scaleFactor=1.2, minNeighbors=5, minSize=(48,48))
+        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB))
+#        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB),
+#                                                number_of_times_to_upsample=0, model="cnn")
 
         batches = np.zeros((len(faces),160,160,3), dtype='float32')
-        for k,(x, y, w, h) in enumerate(faces):
+        for k,(top, right, bottom, left) in enumerate(faces):
         	# extract the confidence (i.e., probability) associated with the
         	# prediction
-            im = cv2.resize(bgrImage[y:y+h, x:x+w],(160,160)).astype('float32')
+            im = cv2.resize(bgrImage[top:bottom, left:right],(160,160)).astype('float32')
             im = np.expand_dims(im, axis=0)
             testim = self.prewhiten(im)
             batches[k] = testim
@@ -195,13 +202,15 @@ class ImageViewer(QMainWindow):
         
         batches_house = []
         for im in bgrImage:
-            faces = self.faceCascade.detectMultiScale(im, scaleFactor=1.2, minNeighbors=5, minSize=(48,48))
+            faces = face_recognition.face_locations(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
+#            faces = face_recognition.face_locations(cv2.cvtColor(im, cv2.COLOR_BGR2RGB),
+#                                                    number_of_times_to_upsample=0, model="cnn")
     
             batchest = np.zeros((len(faces),160,160,3), dtype='float32')
-            for k,(x, y, w, h) in enumerate(faces):
+            for k,(top, right, bottom, left) in enumerate(faces):
             	# extract the confidence (i.e., probability) associated with the
             	# prediction
-                im_ = cv2.resize(im[y:y+h, x:x+w],(160,160)).astype('float32')
+                im_ = cv2.resize(im[top:bottom, left:right],(160,160)).astype('float32')
                 im_ = np.expand_dims(im_, axis=0)
                 testim = self.prewhiten(im_)
                 batchest[k] = testim
@@ -212,7 +221,11 @@ class ImageViewer(QMainWindow):
         y_prod = self.model.predict(batches)
          
         return y_prod
-                    
+    
+    def findFaceAndClassifyForAuto_wrapper(self, fileName):
+        pass
+    
+    
     def open(self):
         fileName, _ = QFileDialog.getOpenFileName(self, "Open File",
                 QDir.currentPath())
