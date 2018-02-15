@@ -4,7 +4,7 @@ Requirments
 ----------
 
 - python 3.6.3
-- tensorflow 1.5.0 (cpu version)
+- tensorflow 1.5.0
 - keras 2.1.3
 - opencv
 
