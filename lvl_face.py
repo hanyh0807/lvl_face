@@ -24,6 +24,7 @@ from PyQt5.QtPrintSupport import QPrinter
 from keras.models import load_model
 import face_recognition
 
+
 #config = tf.ConfigProto(allow_soft_placement = True)
 #config.gpu_options.allow_growth = True
 ##config.gpu_options.per_process_gpu_memory_fraction = 0.3
@@ -45,11 +46,17 @@ class progress(QDialog):
         self.show()
         self.setWindowTitle('Progress')
         
+        self.isclosed = False
+    
+    def closeEvent(self, event):
+      self.isclosed = True
+      print('closed!!!')
+      
     def update(self,n):
         self.progressBar.setValue(n)
         
     def total(self,total):
-        self.progressBar.setMaximum(total)
+        self.progressBar.setMaximum(total)        
 
 class ImageViewer(QMainWindow):
     def __init__(self):
@@ -74,9 +81,10 @@ class ImageViewer(QMainWindow):
         self.setWindowTitle("Lovelyz classifier")
         self.resize(500, 400)
         
-              
 #        with tf.device('/cpu:0'):
         self.model = load_model('model_facenet.h5')
+
+
 
     def prewhiten(self, x):
         if x.ndim == 4:
@@ -143,14 +151,35 @@ class ImageViewer(QMainWindow):
                 sc = maxpix/bgrImage.shape[1]
             bgrImage = cv2.resize(bgrImage, (int(bgrImage.shape[1]*sc), int(bgrImage.shape[0]*sc)))
         
+        bgrImage= cv2.copyMakeBorder(bgrImage,30,30,30,30,cv2.BORDER_CONSTANT,value=0)
+        
         return bgrImage
+    
+    def imaugmentAndBatch(self, im):
+        rows, cols = im.shape[:2]
+        M = cv2.getRotationMatrix2D((cols/2,rows/2),10,1)
+        Mm = cv2.getRotationMatrix2D((cols/2,rows/2),-10,1)
+        im2 = cv2.warpAffine(im, M, (cols, rows))
+        im3 = cv2.warpAffine(im, Mm, (cols, rows))
+        im4 = cv2.flip(im,1)
+        im = np.expand_dims(im, axis=0)
+        im2= np.expand_dims(im2, axis=0)
+        im3 = np.expand_dims(im3, axis=0)
+        im4 = np.expand_dims(im4, axis=0)
+        
+        batches = np.zeros((4,160,160,3), dtype='float32')
+        batches[0] = self.prewhiten(im)
+        batches[1] = self.prewhiten(im2)
+        batches[2] = self.prewhiten(im3)
+        batches[3] = self.prewhiten(im4)
+        
+        return batches
 
     def findFaceAndClassify(self, fileName):
-        bgrImage = self.readImage(fileName)        
+        bgrImage = self.readImage(fileName)       
+        gray = cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY)
         
-        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB))
-#        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB),
-#                                                number_of_times_to_upsample=0, model="cnn")
+        faces = face_recognition.face_locations(gray)
 
         subjects = ["soul", "jiae", "jisoo", "mijoo", "jiyeon", "myungeun", "soojung", "yein"]
 
@@ -158,11 +187,23 @@ class ImageViewer(QMainWindow):
         for k,(top, right, bottom, left) in enumerate(faces):            
         	# extract the confidence (i.e., probability) associated with the
         	# prediction
+#            rect = self.css_to_rect((top, right, bottom, left))
+#            im = cv2.cvtColor(self.fa.align(gray, gray, rect), cv2.COLOR_GRAY2BGR)
             im = cv2.resize(outimg[top:bottom, left:right],(160,160)).astype('float32')
-            im = np.expand_dims(im, axis=0)
-            testim = self.prewhiten(im)
-            y_prod = self.model.predict(testim)
-        #    y_prod = np.random.rand((8)).reshape((1,8))
+            batches = self.imaugmentAndBatch(im)     
+            print(batches.shape)
+            y_prod = self.model.predict(batches)
+            
+            cors = np.corrcoef(y_prod)
+            np.fill_diagonal(cors,0)
+            e = cors.sum(axis=1)
+            wei = np.exp(e)/np.exp(e).sum()
+            print(y_prod)
+            y_prod = (y_prod*wei.reshape([-1,1])).sum(axis=0)
+            print(y_prod)
+            
+            if np.median(y_prod) > 0.08:
+                continue
          
         #    idx = np.argmax(y_prod)
             pt1 = (left, top)
@@ -173,26 +214,24 @@ class ImageViewer(QMainWindow):
             y0, dy = top, 15
             for i, m in enumerate(subjects):
                 yo = y0 + (i+1)*dy
-                cv2.putText(outimg, m + ' : {:.4f}'.format(y_prod[0][i]), (dx, yo), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
+#                cv2.putText(outimg, m + ' : {:.4f}'.format(y_prod[0][i]), (dx, yo), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
+                cv2.putText(outimg, m + ' : {:.4f}'.format(y_prod[i]), (dx, yo), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
 #        
         return outimg
     
     def findFaceAndClassifyForAuto(self, fileName):
         bgrImage = self.readImage(fileName)        
         
-        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB))
-#        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2RGB),
-#                                                number_of_times_to_upsample=0, model="cnn")
-
-        batches = np.zeros((len(faces),160,160,3), dtype='float32')
+        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY))
+        batches_house = []
         for k,(top, right, bottom, left) in enumerate(faces):
         	# extract the confidence (i.e., probability) associated with the
         	# prediction
             im = cv2.resize(bgrImage[top:bottom, left:right],(160,160)).astype('float32')
-            im = np.expand_dims(im, axis=0)
-            testim = self.prewhiten(im)
-            batches[k] = testim
+            testim = self.imaugmentAndBatch(im)
+            batches_house.append(testim)
         
+        batches = np.concatenate(batches_house)
         y_prod = self.model.predict(batches)
          
         return y_prod
@@ -202,19 +241,17 @@ class ImageViewer(QMainWindow):
         
         batches_house = []
         for im in bgrImage:
-            faces = face_recognition.face_locations(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
-#            faces = face_recognition.face_locations(cv2.cvtColor(im, cv2.COLOR_BGR2RGB),
-#                                                    number_of_times_to_upsample=0, model="cnn")
+            faces = face_recognition.face_locations(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY))
     
-            batchest = np.zeros((len(faces),160,160,3), dtype='float32')
+            batchest = []
             for k,(top, right, bottom, left) in enumerate(faces):
             	# extract the confidence (i.e., probability) associated with the
             	# prediction
                 im_ = cv2.resize(im[top:bottom, left:right],(160,160)).astype('float32')
-                im_ = np.expand_dims(im_, axis=0)
-                testim = self.prewhiten(im_)
-                batchest[k] = testim
+                testim = self.imaugmentAndBatch(im_)
+                batchest.append(testim)
             
+            batchest = np.concatenate(batchest)
             batches_house.append(batchest)
             
         batches = np.concatenate(batches_house)
@@ -274,53 +311,68 @@ class ImageViewer(QMainWindow):
     def autoClassify(self):
         dirName = QFileDialog.getExistingDirectory()
         
-        subjects_hangle = ["소울", "지애", "지수", "미주", "지연", "명은", "수정", "예인"]
-        for m in subjects_hangle:
-            pp = os.path.join(dirName, m)
-            if not os.path.isdir(pp):
-                os.mkdir(pp)
-        
-        filenames = os.listdir(dirName)
-        
-        ims = []
-        for filename in filenames:            
-            fullname = os.path.join(dirName, filename)
-            if not os.path.isdir(fullname):
-                ims.append(fullname)
-        
-        cantOpen = []
-        failed = []
-        prog = progress()
-        prog.total(len(ims))
-        for k, im in enumerate(ims):            
-#            progress.setValue(k * 100/len(ims))
-            prog.update(k)
-            QApplication.processEvents()
-            prediction = None
-            try:
-                if im.split('.')[-1] == 'gif':
-                    prediction = self.findFaceAndClassifyForAuto_gif(im)
-                else:
-                    prediction = self.findFaceAndClassifyForAuto(im)
+        if dirName:
+            subjects_hangle = ["소울", "지애", "지수", "미주", "지연", "명은", "수정", "예인"]
+            for m in subjects_hangle:
+                pp = os.path.join(dirName, m)
+                if not os.path.isdir(pp):
+                    os.mkdir(pp)
+            alayalay = os.path.join(dirName, '미묘미묘해')
+            if not os.path.isdir(alayalay):
+                os.mkdir(alayalay)
             
+            filenames = os.listdir(dirName)
             
-                isex = False
-                for cand, prob in enumerate(prediction):
-                    if np.max(prob) < 0.8:
-                        isex = True
+            ims = []
+            for filename in filenames:            
+                fullname = os.path.join(dirName, filename)
+                if not os.path.isdir(fullname):
+                    ims.append(fullname)
+            
+            cantOpen = []
+            failed = []
+            prog = progress()
+            prog.total(len(ims))
+            for k, im in enumerate(ims):
+    #            progress.setValue(k * 100/len(ims))
+                if prog.isclosed:
+                    break
+                prog.update(k)
+                QApplication.processEvents()
+                prediction = None
+                try:
+                    if im.split('.')[-1] == 'gif':
+                        prediction = self.findFaceAndClassifyForAuto_gif(im)
                     else:
-                        copy2(im, os.path.join(dirName, subjects_hangle[np.argmax(prob)]))
-                    
-                if isex:
-                    failed.append(im)
-            except:
-                print('Can\'t open ',im)
-                cantOpen.append(im)
-                pass
-            
-        np.savetxt(os.path.join(dirName,'잘뭐르게써여.txt'), failed, fmt='%s')
-        np.savetxt(os.path.join(dirName,'열지 못한 파일.txt'), cantOpen, fmt='%s')
-        del prog
+                        prediction = self.findFaceAndClassifyForAuto(im)                    
+                
+                    isex = False                    
+                    for cand in range(int(prediction.shape[0]/4)):
+                        prob = prediction[(cand*4):((cand+1)*4)]
+                        cors = np.corrcoef(prob)
+                        np.fill_diagonal(cors,0)
+                        e = cors.sum(axis=1)
+                        wei = np.exp(e)/np.exp(e).sum()
+                        y_prob = (prob*wei.reshape([-1,1])).sum(axis=0)
+                        print(y_prob)
+                        if np.median(y_prob) > 0.08:
+                            continue
+                        if np.max(y_prob) < 0.65:
+                            isex = True
+                            copy2(im, alayalay)
+                        else:
+                            copy2(im, os.path.join(dirName, subjects_hangle[np.argmax(y_prob)]))
+                        
+                    if isex:
+                        failed.append(im)
+                except:
+                    print('Can\'t open ',im)
+                    cantOpen.append(im)
+                    pass
+                
+            np.savetxt(os.path.join(dirName,'미묘미묘해.txt'), failed, fmt='%s')
+            np.savetxt(os.path.join(dirName,'열지 못한 파일.txt'), cantOpen, fmt='%s')
+            del prog
     
     def createActions(self):
         self.openAct = QAction("&Open...", self, shortcut="Ctrl+O",
