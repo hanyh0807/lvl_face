@@ -9,27 +9,16 @@ import os
 
 import cv2
 import numpy as np
-from scipy import optimize
 from PIL import Image
 from shutil import copy2
 
 from PyQt5.QtCore import QDir
 from PyQt5.QtGui import QImage, QPalette, QPixmap
 from PyQt5.QtWidgets import (QAction, QApplication, QFileDialog, QLabel,
-        QMainWindow, QMenu, QMessageBox, QScrollArea, QSizePolicy, QProgressBar, QDialog)
+        QMainWindow, QMenu, QMessageBox, QScrollArea, QSizePolicy, QProgressBar, QDialog, QActionGroup)
 from PyQt5.QtPrintSupport import QPrinter
 
-#import tensorflow as tf
-#from keras.backend.tensorflow_backend import set_session
-from keras.models import load_model
 import face_recognition
-
-
-#config = tf.ConfigProto(allow_soft_placement = True)
-#config.gpu_options.allow_growth = True
-##config.gpu_options.per_process_gpu_memory_fraction = 0.3
-#set_session(tf.Session(config=config))
-
 
 class progress(QDialog):
     def __init__(self):
@@ -50,7 +39,7 @@ class progress(QDialog):
     
     def closeEvent(self, event):
       self.isclosed = True
-      print('closed!!!')
+#      print('closed!!!')
       
     def update(self,n):
         self.progressBar.setValue(n)
@@ -82,11 +71,15 @@ class ImageViewer(QMainWindow):
         self.resize(500, 400)
         
 #        with tf.device('/cpu:0'):
-        self.model = load_model('model_facenet.h5')
-
-
+        self.face_detector = cv2.dnn.readNetFromCaffe('deploy.prototxt.txt','res10_300x300_ssd_iter_140000.caffemodel')
+        self.model = cv2.dnn.readNetFromTensorflow('model.pb','model.pbtxt')
+        
+        self.useHOG = True
 
     def prewhiten(self, x):
+        """
+        for facenet
+        """
         if x.ndim == 4:
             axis = (1, 2, 3)
             size = x[0].size
@@ -101,6 +94,40 @@ class ImageViewer(QMainWindow):
         std_adj = np.maximum(std, 1.0/np.sqrt(size))
         y = (x - mean) / std_adj
         return y
+    
+    def preprocess_input(self, x, data_format='channels_last', version=1):
+        """
+        for vggface
+        """
+        x_temp = np.copy(x)
+    
+        if version == 1: # VGG
+            if data_format == 'channels_first':
+                x_temp = x_temp[:, ::-1, ...]
+                x_temp[:, 0, :, :] -= 93.5940
+                x_temp[:, 1, :, :] -= 104.7624
+                x_temp[:, 2, :, :] -= 129.1863
+            else:
+                x_temp = x_temp[..., ::-1]
+                x_temp[..., 0] -= 93.5940
+                x_temp[..., 1] -= 104.7624
+                x_temp[..., 2] -= 129.1863
+    
+        elif version == 2: # RESNET50, SENET50
+            if data_format == 'channels_first':
+                x_temp = x_temp[:, ::-1, ...]
+                x_temp[:, 0, :, :] -= 91.4953
+                x_temp[:, 1, :, :] -= 103.8827
+                x_temp[:, 2, :, :] -= 131.0912
+            else:
+                x_temp = x_temp[..., ::-1]
+                x_temp[..., 0] -= 91.4953
+                x_temp[..., 1] -= 103.8827
+                x_temp[..., 2] -= 131.0912
+        else:
+            raise NotImplementedError
+    
+        return x_temp
     
     def extractThreeFrame(self, inGif):
         out = []
@@ -155,6 +182,23 @@ class ImageViewer(QMainWindow):
         
         return bgrImage
     
+    def detectFace(self, im):
+        (h, w) = im.shape[:2]
+        blob = cv2.dnn.blobFromImage(cv2.resize(im, (300, 300)), 1.0,	(300, 300), (104.0, 177.0, 123.0))
+
+        self.face_detector.setInput(blob)
+        detections = self.face_detector.forward()
+
+        faces = []
+        for i in range(0, detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > 0.5:
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                faces.append(box.astype("int")) # (startX, startY, endX, endY)
+                
+        return faces
+
+        
     def imaugmentAndBatch(self, im):
         rows, cols = im.shape[:2]
         M = cv2.getRotationMatrix2D((cols/2,rows/2),10,1)
@@ -167,51 +211,60 @@ class ImageViewer(QMainWindow):
         im3 = np.expand_dims(im3, axis=0)
         im4 = np.expand_dims(im4, axis=0)
         
-        batches = np.zeros((4,160,160,3), dtype='float32')
-        batches[0] = self.prewhiten(im)
-        batches[1] = self.prewhiten(im2)
-        batches[2] = self.prewhiten(im3)
-        batches[3] = self.prewhiten(im4)
+        batches = np.zeros((4,224,224,3), dtype='float32')
+#        batches[0] = self.preprocess_input(im)
+#        batches[1] = self.preprocess_input(im2)
+#        batches[2] = self.preprocess_input(im3)
+#        batches[3] = self.preprocess_input(im4)
+        batches[0] = im
+        batches[1] = im2
+        batches[2] = im3
+        batches[3] = im4
+        batches = cv2.dnn.blobFromImages(batches, 1.0,	(224, 224), (93.594, 104.7624, 129.1863))
         
         return batches
 
     def findFaceAndClassify(self, fileName):
-        bgrImage = self.readImage(fileName)       
-        gray = cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY)
+        bgrImage = self.readImage(fileName)               
         
-        faces = face_recognition.face_locations(gray)
+        if self.useHOG:
+            faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY))
+        else:
+            faces = self.detectFace(bgrImage)
 
         subjects = ["soul", "jiae", "jisoo", "mijoo", "jiyeon", "myungeun", "soojung", "yein"]
 
         outimg = bgrImage.copy()
-        for k,(top, right, bottom, left) in enumerate(faces):            
+        for k,(startX, startY, endX, endY) in enumerate(faces):            
         	# extract the confidence (i.e., probability) associated with the
         	# prediction
-#            rect = self.css_to_rect((top, right, bottom, left))
-#            im = cv2.cvtColor(self.fa.align(gray, gray, rect), cv2.COLOR_GRAY2BGR)
-            im = cv2.resize(outimg[top:bottom, left:right],(160,160)).astype('float32')
+            if self.useHOG:
+                y1 = startX; y2 = endX; x1 = endY; x2 = startY
+                im = cv2.resize(outimg[y1:y2, x1:x2],(224,224)).astype('float32')
+            else:
+                y1 = startY; y2 = endY; x1 = startX; x2 = endX
+                im = cv2.resize(outimg[y1:y2, x1:x2],(224,224)).astype('float32')
             batches = self.imaugmentAndBatch(im)     
-            print(batches.shape)
-            y_prod = self.model.predict(batches)
+            
+            self.model.setInput(batches)
+            y_prod = self.model.forward()
             
             cors = np.corrcoef(y_prod)
             np.fill_diagonal(cors,0)
             e = cors.sum(axis=1)
             wei = np.exp(e)/np.exp(e).sum()
-            print(y_prod)
             y_prod = (y_prod*wei.reshape([-1,1])).sum(axis=0)
-            print(y_prod)
+#            print(y_prod)
             
             if np.median(y_prod) > 0.08:
                 continue
          
-        #    idx = np.argmax(y_prod)
-            pt1 = (left, top)
-            pt2 = (right, bottom)
+            pt1 = (x1, y1)
+            pt2 = (x2, y2)
             cv2.rectangle(outimg,pt1,pt2,(255,0,0),2) 
             
-            dx = left-156 if right+156 > outimg.shape[1] else right+3
-            y0, dy = top, 15
+            dx = x1-156 if x2+156 > outimg.shape[1] else x2+3
+            y0, dy = y1, 15
             for i, m in enumerate(subjects):
                 yo = y0 + (i+1)*dy
 #                cv2.putText(outimg, m + ' : {:.4f}'.format(y_prod[0][i]), (dx, yo), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255))
@@ -221,18 +274,28 @@ class ImageViewer(QMainWindow):
     
     def findFaceAndClassifyForAuto(self, fileName):
         bgrImage = self.readImage(fileName)        
+
+        if self.useHOG:
+            faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY))
+        else:
+            faces = self.detectFace(bgrImage)
         
-        faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY))
         batches_house = []
-        for k,(top, right, bottom, left) in enumerate(faces):
+        for k,(startX, startY, endX, endY) in enumerate(faces):
         	# extract the confidence (i.e., probability) associated with the
         	# prediction
-            im = cv2.resize(bgrImage[top:bottom, left:right],(160,160)).astype('float32')
+            if self.useHOG:
+                y1 = startX; y2 = endX; x1 = endY; x2 = startY
+                im = cv2.resize(bgrImage[y1:y2, x1:x2],(224,224)).astype('float32')
+            else:
+                y1 = startY; y2 = endY; x1 = startX; x2 = endX
+                im = cv2.resize(bgrImage[y1:y2, x1:x2],(224,224)).astype('float32')
             testim = self.imaugmentAndBatch(im)
             batches_house.append(testim)
         
         batches = np.concatenate(batches_house)
-        y_prod = self.model.predict(batches)
+        self.model.setInput(batches)
+        y_prod = self.model.forward()
          
         return y_prod
     
@@ -241,13 +304,22 @@ class ImageViewer(QMainWindow):
         
         batches_house = []
         for im in bgrImage:
-            faces = face_recognition.face_locations(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY))
-    
+            if self.useHOG:
+                faces = face_recognition.face_locations(cv2.cvtColor(bgrImage, cv2.COLOR_BGR2GRAY))
+            else:
+                faces = self.detectFace(bgrImage)
+            
             batchest = []
-            for k,(top, right, bottom, left) in enumerate(faces):
+            for k,(startX, startY, endX, endY) in enumerate(faces):
             	# extract the confidence (i.e., probability) associated with the
             	# prediction
-                im_ = cv2.resize(im[top:bottom, left:right],(160,160)).astype('float32')
+                if self.useHOG:
+                    y1 = startX; y2 = endX; x1 = endY; x2 = startY
+                    im_ = cv2.resize(im[y1:y2, x1:x2],(224,224)).astype('float32')
+                else:
+                    y1 = startY; y2 = endY; x1 = startX; x2 = endX
+                    im_ = cv2.resize(im[y1:y2, x1:x2],(224,224)).astype('float32')
+                
                 testim = self.imaugmentAndBatch(im_)
                 batchest.append(testim)
             
@@ -255,7 +327,8 @@ class ImageViewer(QMainWindow):
             batches_house.append(batchest)
             
         batches = np.concatenate(batches_house)
-        y_prod = self.model.predict(batches)
+        self.model.setInput(batches)
+        y_prod = self.model.forward()
          
         return y_prod
     
@@ -354,7 +427,6 @@ class ImageViewer(QMainWindow):
                         e = cors.sum(axis=1)
                         wei = np.exp(e)/np.exp(e).sum()
                         y_prob = (prob*wei.reshape([-1,1])).sum(axis=0)
-                        print(y_prob)
                         if np.median(y_prob) > 0.08:
                             continue
                         if np.max(y_prob) < 0.65:
@@ -373,6 +445,12 @@ class ImageViewer(QMainWindow):
             np.savetxt(os.path.join(dirName,'미묘미묘해.txt'), failed, fmt='%s')
             np.savetxt(os.path.join(dirName,'열지 못한 파일.txt'), cantOpen, fmt='%s')
             del prog
+    
+    def hogTrue(self):
+        self.useHOG = True
+    
+    def dnnTrue(self):
+        self.useHOG = False
     
     def createActions(self):
         self.openAct = QAction("&Open...", self, shortcut="Ctrl+O",
@@ -395,6 +473,9 @@ class ImageViewer(QMainWindow):
                 checkable=True, shortcut="Ctrl+F", triggered=self.fitToWindow)
 
         self.autoClassifyAct = QAction("&자동분류", self, triggered=self.autoClassify)
+        
+        self.setHOG = QAction("&HOG", self, triggered=self.hogTrue, checkable=True)
+        self.setDNN = QAction("&DNN", self, triggered=self.dnnTrue, checkable=True)
 
     def createMenus(self):
         self.fileMenu = QMenu("&File", self)
@@ -411,10 +492,17 @@ class ImageViewer(QMainWindow):
 
         self.dirMenu = QMenu("&Auto", self)
         self.dirMenu.addAction(self.autoClassifyAct)
+        
+        self.methodMenu = QMenu("&Method", self)
+        self.ag = QActionGroup(self)        
+        self.methodMenu.addAction(self.ag.addAction(self.setHOG))        
+        self.methodMenu.addAction(self.ag.addAction(self.setDNN))
+
 
         self.menuBar().addMenu(self.fileMenu)
         self.menuBar().addMenu(self.viewMenu)
         self.menuBar().addMenu(self.dirMenu)
+        self.menuBar().addMenu(self.methodMenu)
 
     def updateActions(self):
         self.zoomInAct.setEnabled(not self.fitToWindowAct.isChecked())
