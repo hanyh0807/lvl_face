@@ -4,8 +4,10 @@ Requirments
 ----------
 
 - python 3.6.3
-- tensorflow 1.5.0
-- keras 2.1.3
 - opencv
+- face_recognition
 
-- Facenet from https://github.com/nyoki-mtl/keras-facenet
+----------
+
+Model files
+https://drive.google.com/drive/folders/1Nm7XbXlXAY-HmDIOoYikK4FUeoszZ7es?usp=sharing
